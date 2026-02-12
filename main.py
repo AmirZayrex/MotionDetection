@@ -66,7 +66,9 @@ while True:
     cv2.imshow("Live Camera", frame_display)
     cv2.imshow("Motion Mask", motion_mask)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    # if cv2.waitKey(1) & 0xFF == ord('q'):
+    #     break
+    if cv2.waitKey(1) == ord('q') or event_type == "EXIT":
         break
 camera.release()
 cv2.destroyAllWindows()
