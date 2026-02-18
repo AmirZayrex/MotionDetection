@@ -26,7 +26,7 @@ class EventLogger:
             thickness=2
         )
 
-        cv2.imwrite(filename, frame)
+        cv2.imwrite(filename, frame_to_save)
 
         event_data = {
             "type": event_type,

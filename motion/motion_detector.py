@@ -1,116 +1,95 @@
 import cv2
 import numpy as np
+from collections import deque
 
 class MotionDetector:
-    def __init__(self, alpha=0.05, threshold=25, buffer_size=5, min_area=500, merge_dist=50):
-        self.alpha = alpha
-        self.threshold = threshold
-        self.buffer_size = buffer_size
+    def __init__(
+        self,
+        min_area=1500,
+        roi_polygon=None,
+        line_ratio=0.4
+    ):
         self.min_area = min_area
-        self.merge_dist = merge_dist
+        self.roi_polygon = roi_polygon
+        self.centroid_buffer = deque(maxlen=3)
 
-        self.background = None
-        self.area_buffer = []
-        self.prev_smoothed_area = None
+        # MOG2
+        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=500,
+            varThreshold=80,
+            detectShadows=False
+        )
+
+        # Line crossing
+        self.line_ratio = line_ratio
+        self.prev_side = None
 
     def initialize_background(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        self.background = cv2.GaussianBlur(gray, (5, 5), 0)
+        self.bg_subtractor.apply(frame)
 
     def detect(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        diff = cv2.absdiff(gray_blur, self.background)
-        motion_mask = diff > self.threshold
-        motion_mask_uint8 = (motion_mask.astype(np.uint8) * 255)
+        fg_mask = self.bg_subtractor.apply(frame)
+        _, motion_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
 
         contours, _ = cv2.findContours(
-            motion_mask_uint8,
+            motion_mask,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        boxes = []
+        largest_contour = None
+        largest_area = 0
+
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < self.min_area:
                 continue
-            x, y, w, h = cv2.boundingRect(cnt)
-            boxes.append([x, y, x + w, y + h])
 
-        merged_boxes = self.merge_boxes(boxes)
+            if area > largest_area:
+                largest_area = area
+                largest_contour = cnt
 
-        for box in merged_boxes:
-            x1, y1, x2, y2 = box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        # centroid = None
+        event = None
 
-        motion_area = sum((x2 - x1) * (y2 - y1) for x1, y1, x2, y2 in merged_boxes)
+        h, w = frame.shape[:2]
+        line_x = int(w * self.line_ratio)
 
-        self.area_buffer.append(motion_area)
-        if len(self.area_buffer) > self.buffer_size:
-            self.area_buffer.pop(0)
-        smoothed_area = np.mean(self.area_buffer)
+        # رسم خط
+        cv2.line(frame, (line_x, 0), (line_x, h), (255, 0, 0), 2)
 
-        if self.prev_smoothed_area is None:
-            trend = 0
-        else:
-            trend = smoothed_area - self.prev_smoothed_area
-        self.prev_smoothed_area = smoothed_area
+        if largest_contour is not None:
+            m = cv2.moments(largest_contour)
+            if m["m00"] != 0:
+                cx = int(m["m10"] / m["m00"])
+                cy = int(m["m01"] / m["m00"])
+                # centroid = (cx, cy)
 
-        #Adaptive Background Update
-        self.background = cv2.addWeighted(
-            self.background.astype(np.float32),
-            1 - self.alpha,
-            gray_blur.astype(np.float32),
-            self.alpha,
-            0
-        ).astype(np.uint8)
+                self.centroid_buffer.append((cx, cy))
 
-        return frame, motion_mask_uint8, smoothed_area, trend
+                avg_cx = int(np.mean([c[0] for c in self.centroid_buffer]))
+                avg_cy = int(np.mean([c[1] for c in self.centroid_buffer]))
 
-    def merge_boxes(self, boxes):
-        if not boxes:
-            return []
+                centroid = (avg_cx, avg_cy)
 
-        merged = True
-        while merged:
-            merged = False
-            new_boxes = []
-            used = [False] * len(boxes)
 
-            for i, box1 in enumerate(boxes):
-                if used[i]:
-                    continue
-                x1a, y1a, x2a, y2a = box1
-                merged_box = box1.copy()
+                cv2.circle(frame, centroid, 6, (0, 0, 255), -1)
 
-                for j, box2 in enumerate(boxes):
-                    if i == j or used[j]:
-                        continue
-                    x1b, y1b, x2b, y2b = box2
-                    if self.boxes_close(merged_box, box2):
-                        merged_box = [
-                            min(merged_box[0], x1b),
-                            min(merged_box[1], y1b),
-                            max(merged_box[2], x2b),
-                            max(merged_box[3], y2b)
-                        ]
-                        used[j] = True
-                        merged = True
+                if self.roi_polygon is not None:
+                    if cv2.pointPolygonTest(self.roi_polygon, centroid, False) < 0:
+                        return frame, motion_mask, None
 
-                new_boxes.append(merged_box)
-                used[i] = True
+                current_side = "left" if cx < line_x else "right"
 
-            boxes = new_boxes
+                if self.prev_side is None:
+                    self.prev_side = current_side
+                    return frame, motion_mask, None
 
-        return boxes
+                if current_side != self.prev_side:
+                    if self.prev_side == "left" and current_side == "right":
+                        event = "ENTER"
+                    elif self.prev_side == "right" and current_side == "left":
+                        event = "EXIT"
 
-    def boxes_close(self, box1, box2):
-        x1a, y1a, x2a, y2a = box1
-        x1b, y1b, x2b, y2b = box2
-
-        dist_x = max(0, max(x1a - x2b, x1b - x2a))
-        dist_y = max(0, max(y1a - y2b, y1b - y2a))
-
-        return dist_x < self.merge_dist and dist_y < self.merge_dist
+                self.prev_side = current_side
+        return frame, motion_mask, event

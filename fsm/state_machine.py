@@ -7,23 +7,21 @@ from config import (
     TREND_STABLE,
     EXIT_FRAMES_REQUIRED
 )
-
 STATE_EMPTY    = 0
 STATE_ENTERING = 1
 STATE_INSIDE   = 2
 STATE_EXITING  = 3
 
-
 class FSM:
     def __init__(self):
         self.state = STATE_EMPTY
         self.prev_smoothed_area = None
-
         self.exit_counter = 0
-        self.last_presence_frame = None
+        self.last_presence_frame = None  # فریم آخر حضور
+        self.exit_emitted = False       # جلوگیری از چندبار ثبت EXIT
 
     def update(self, smoothed_area, raw_frame=None):
-
+        # ---------- trend ----------
         if self.prev_smoothed_area is None:
             trend = 0
         else:
@@ -33,6 +31,8 @@ class FSM:
         event_type = None
 
         if self.state == STATE_EMPTY:
+            self.exit_emitted = False
+            self.last_presence_frame = None
             if smoothed_area > ENTER_AREA and trend > ENTER_TREND:
                 self.state = STATE_ENTERING
                 event_type = "ENTER"
@@ -43,7 +43,7 @@ class FSM:
                 event_type = "INSIDE"
 
         elif self.state == STATE_INSIDE:
-            # فقط اینجا فریم معتبر حضور ذخیره می‌شود
+            # آخرین فریم معتبر حضور را نگه داریم
             if raw_frame is not None:
                 self.last_presence_frame = raw_frame.copy()
 
@@ -52,13 +52,19 @@ class FSM:
                 self.exit_counter = 0
 
         elif self.state == STATE_EXITING:
-            if smoothed_area < EXIT_AREA:
-                self.exit_counter += 1
-            else:
+            # هنوز داخل ناحیه است → فریم حضور را نگه داریم
+            if smoothed_area >= EXIT_AREA:
+                if raw_frame is not None:
+                    self.last_presence_frame = raw_frame.copy()
                 self.exit_counter = 0
+            else:
+                self.exit_counter += 1
 
-            if self.exit_counter >= EXIT_FRAMES_REQUIRED:
+            if self.exit_counter >= EXIT_FRAMES_REQUIRED and not self.exit_emitted:
                 event_type = "EXIT"
+                self.exit_emitted = True
+
+            if self.exit_emitted and smoothed_area < EXIT_AREA:
                 self.state = STATE_EMPTY
                 self.exit_counter = 0
 
